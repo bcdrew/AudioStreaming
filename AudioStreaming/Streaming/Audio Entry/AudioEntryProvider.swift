@@ -9,6 +9,13 @@ protocol AudioEntryProviding {
     func provideAudioEntry(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> AudioEntry
     func provideAudioEntry(url: URL, headers: [String: String]) -> AudioEntry
     func provideAudioEntry(url: URL) -> AudioEntry
+    func provideAudioEntry(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> AudioEntry
+    func provideAudioEntry(url: URL, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> AudioEntry
+    func provideAudioSource(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> AudioStreamSource
+    func provideAudioSource(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> AudioStreamSource
+    func provideFileAudioSource(url: URL) -> CoreAudioStreamSource
+    func source(for url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> CoreAudioStreamSource
+    func source(for url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> CoreAudioStreamSource
 }
 
 final class AudioEntryProvider: AudioEntryProviding {
@@ -25,31 +32,47 @@ final class AudioEntryProvider: AudioEntryProviding {
         self.outputAudioFormat = outputAudioFormat
     }
 
-    func provideAudioEntry(url: URL, headers: [String: String]) -> AudioEntry {
-        let source = self.source(for: url, httpMethod: nil, httpBody: nil, headers: headers)
-        return AudioEntry(source: source,
-                          entryId: AudioEntryId(id: url.absoluteString),
-                          outputAudioFormat: outputAudioFormat)
-    }
-    
-    func provideAudioEntry(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> AudioEntry {
-        let source = self.source(for: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers)
+    func provideAudioEntry(url: URL, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> AudioEntry {
+        let source = self.source(for: url, httpMethod: nil, httpBody: nil, headers: headers, urlRefreshCB: urlRefreshCB)
         return AudioEntry(source: source,
                           entryId: AudioEntryId(id: url.absoluteString),
                           outputAudioFormat: outputAudioFormat)
     }
 
+    func provideAudioEntry(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> AudioEntry {
+        let source = self.source(for: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: urlRefreshCB)
+        return AudioEntry(source: source,
+                          entryId: AudioEntryId(id: url.absoluteString),
+                          outputAudioFormat: outputAudioFormat)
+    }
+
+    func provideAudioEntry(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> AudioEntry {
+        provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: nil)
+    }
+
+    func provideAudioEntry(url: URL, headers: [String: String]) -> AudioEntry {
+        provideAudioEntry(url: url, headers: headers, urlRefreshCB: nil)
+    }
+
     func provideAudioEntry(url: URL) -> AudioEntry {
         provideAudioEntry(url: url, headers: [:])
     }
-    
+
     func provideAudioSource(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> AudioStreamSource {
-        RemoteAudioSource(networking: networkingClient,
+        provideAudioSource(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: nil)
+    }
+
+    func provideAudioSource(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> AudioStreamSource {
+        let source = RemoteAudioSource(networking: networkingClient,
                           url: url,
                           httpMethod: httpMethod,
                           httpBody: httpBody,
                           underlyingQueue: underlyingQueue,
                           httpHeaders: headers)
+        if let refreshCB = urlRefreshCB {
+            source.urlRefreshCB = refreshCB
+        }
+        return source
     }
 
     func provideFileAudioSource(url: URL) -> CoreAudioStreamSource {
@@ -57,9 +80,13 @@ final class AudioEntryProvider: AudioEntryProviding {
     }
 
     func source(for url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) -> CoreAudioStreamSource {
+        source(for: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: nil)
+    }
+
+    func source(for url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: (() async throws -> URL)?) -> CoreAudioStreamSource {
         guard !url.isFileURL else {
             return provideFileAudioSource(url: url)
         }
-        return provideAudioSource(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers)
+        return provideAudioSource(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: urlRefreshCB)
     }
 }

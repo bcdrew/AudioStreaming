@@ -5,7 +5,6 @@
 
 import AVFoundation
 import CoreAudio
-import OSLog
 
 open class AudioPlayer {
     public weak var delegate: AudioPlayerDelegate?
@@ -32,10 +31,7 @@ open class AudioPlayer {
     /// result in the audio being exhausted before it could fetch new data.
     public var rate: Float {
         get { rateNode.rate }
-        set { 
-            rateNode.rate = newValue 
-            rateNode.bypass = (newValue == 1.0)
-        }
+        set { rateNode.rate = newValue }
     }
 
     /// The player's current state.
@@ -94,43 +90,11 @@ open class AudioPlayer {
         guard let entry = playingEntry else { return 0 }
         return entry.framesPlayed
     }
-    
-    /// Indicates whether seeking is supported for the currently playing audio
-    ///
-    /// Returns `false` if:
-    /// - The audio format doesn't support seeking (e.g., Ogg Vorbis streams)
-    /// - The stream has no valid duration (e.g., live radio streams)
-    ///
-    /// Use this property to enable/disable seek controls in your UI
-    public var isSeekable: Bool {
-        guard playerContext.internalState != .pendingNext else { return true }
-        
-        playerContext.entriesLock.lock()
-        let playingEntry = playerContext.audioPlayingEntry
-        playerContext.entriesLock.unlock()
-        guard let entry = playingEntry else { return true }
-        
-        // Check if format supports seeking (Ogg Vorbis doesn't)
-        if entry.audioFileHint == kAudioFileOggType {
-            return false
-        }
-        
-        // Check if stream has a valid duration (live streams don't)
-        let entryDuration = entry.duration()
-        return entryDuration > 0
-    }
 
     public private(set) var customAttachedNodes = [AVAudioNode]()
 
     /// The current configuration of the player.
     public let configuration: AudioPlayerConfiguration
-
-    /// The loop mode for the audio player
-    /// Defaults to `.off`. 
-    /// - Use `.single(times:)` to loop the current track
-    /// - Use `.all(times:)` to loop the entire queue
-    /// - Pass `nil` for times to loop infinitely, or a positive integer to loop that many times
-    public var loopMode: AudioPlayerLoopMode = .off
 
     /// A Boolean value that indicates whether the audio engine is running.
     /// `true` if the engine is running, otherwise, `false`
@@ -175,13 +139,6 @@ open class AudioPlayer {
     private let entryProvider: AudioEntryProviding
 
     var entriesQueue: PlayerQueueEntries
-    
-    /// Stores the original queue entries for loop all functionality
-    private var originalQueueForLoop: [LoopEntryInfo] = []
-    /// Tracks played entries for loop functionality
-    private var playedEntries: [LoopEntryInfo] = []
-    /// Tracks the current loop iteration (how many times we've looped so far)
-    private var currentLoopIteration: Int = 0
 
     public init(configuration: AudioPlayerConfiguration = .default) {
         self.configuration = configuration.normalizeValues()
@@ -219,7 +176,6 @@ open class AudioPlayer {
         )
         configPlayerContext()
         configPlayerNode()
-        configureRateNode()
         setupEngine()
     }
 
@@ -246,7 +202,18 @@ open class AudioPlayer {
         let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers)
         play(audioEntry: audioEntry)
     }
-    
+
+    /// Starts the audio playback for the given URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - parameter url: A `URL` specifying the audio context to be played.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func play(url: URL, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers, urlRefreshCB: urlRefreshCB)
+        play(audioEntry: audioEntry)
+    }
+
     /// Starts the audio playback for the given URL
     ///
     /// - parameter url: A `URL` specifying the audio context to be played.
@@ -255,6 +222,19 @@ open class AudioPlayer {
     /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
     public func play(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) {
         let audioEntry = entryProvider.provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers)
+        play(audioEntry: audioEntry)
+    }
+
+    /// Starts the audio playback for the given URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - parameter url: A `URL` specifying the audio context to be played.
+    /// - parameter httpMethod: A `String` specifying the HTTP method to use (e.g. "GET", "POST").
+    /// - parameter httpBody: A "Data" specifying the HTTP request body, if any.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func play(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: urlRefreshCB)
         play(audioEntry: audioEntry)
     }
 
@@ -274,9 +254,6 @@ open class AudioPlayer {
         checkRenderWaitingAndNotifyIfNeeded()
         serializationQueue.sync {
             clearQueue()
-            // Reset loop tracking when starting new playback
-            playedEntries.removeAll()
-            currentLoopIteration = 0
             entriesQueue.enqueue(item: audioEntry, type: .upcoming)
             playerContext.setInternalState(to: .pendingNext)
             do {
@@ -382,6 +359,50 @@ open class AudioPlayer {
         }
     }
 
+    /// Queues the specified URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - Parameter url: A `URL` specifying the audio content to be played.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func queue(url: URL, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers, urlRefreshCB: urlRefreshCB)
+        queue(audioEntry: audioEntry)
+    }
+
+    /// Queues the specified URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - Parameter url: A `URL` specifying the audio content to be played.
+    /// - parameter httpMethod: A `String` specifying the HTTP method to use (e.g. "GET", "POST").
+    /// - parameter httpBody: A "Data" specifying the HTTP request body, if any.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func queue(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: urlRefreshCB)
+        queue(audioEntry: audioEntry)
+    }
+
+    /// Queues the specified URLs with a shared refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - Parameter urls: An array of `URL`s specifying the audio content to be played.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func queue(urls: [URL], headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        serializationQueue.sync {
+            for url in urls {
+                let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers, urlRefreshCB: urlRefreshCB)
+                audioEntry.delegate = self
+                entriesQueue.enqueue(item: audioEntry, type: .upcoming)
+            }
+        }
+        checkRenderWaitingAndNotifyIfNeeded()
+        sourceQueue.async { [weak self] in
+            self?.processSource()
+        }
+    }
+
     private func queue(audioEntry: AudioEntry, after afterUrl: URL? = nil) {
         serializationQueue.sync {
             audioEntry.delegate = self
@@ -450,7 +471,7 @@ open class AudioPlayer {
             do {
                 try startEngine()
             } catch {
-                Logger.debug("resuming audio engine failed: \(error.localizedDescription)", category: .generic)
+                Logger.debug("resuming audio engine failed: %@", category: .generic, args: error.localizedDescription)
             }
             if let playingEntry = playerContext.audioReadingEntry {
                 if playingEntry.seekRequest.requested {
@@ -553,18 +574,8 @@ open class AudioPlayer {
             audioEngine.prepare()
             try audioEngine.start()
         } catch {
-            Logger.error("⚠️ error setting up audio engine: \(error.localizedDescription)", category: .generic)
+            Logger.error("⚠️ error setting up audio engine: %@", category: .generic, args: error.localizedDescription)
         }
-    }
-
-    // Add this new method
-    private func configureRateNode() {
-        // Set overlap to a lower value for faster transitions (default is 8.0)
-        rateNode.overlap = 4.0
-        // Ensure pitch is not shifted
-        rateNode.pitch = 0
-        // Bypass by default since rate starts at 1.0
-        rateNode.bypass = true
     }
 
     /// Creates and configures an `AVAudioUnit` with an output configuration
@@ -596,14 +607,7 @@ open class AudioPlayer {
             guard let self = self else { return }
             self.serializationQueue.sync {
                 let nextEntry = self.entriesQueue.dequeue(type: .buffering)
-                
-                if nextEntry == nil {
-                    if let entry = entry {
-                        self.handleLoopingIfNeeded(for: entry)
-                    }
-                } else {
-                    self.processFinishPlaying(entry: entry, with: nextEntry)
-                }
+                self.processFinishPlaying(entry: entry, with: nextEntry)
             }
             self.sourceQueue.async {
                 self.processSource()
@@ -715,22 +719,18 @@ open class AudioPlayer {
 
         guard playerContext.internalState != .paused else { return }
 
-        let snapshot = playerContext.entriesLock.withLock {
-            (reading: playerContext.audioReadingEntry, playing: playerContext.audioPlayingEntry)
-        }
-
         if playerContext.internalState == .pendingNext {
             let entry = entriesQueue.dequeue(type: .upcoming)
             playerContext.setInternalState(to: .waitingForData)
             setCurrentReading(entry: entry, startPlaying: true, shouldClearQueue: true)
             rendererContext.resetBuffers()
-        } else if let playingEntry = snapshot.playing,
+        } else if let playingEntry = playerContext.audioPlayingEntry,
                   playingEntry.seekRequest.requested,
-                  playingEntry != snapshot.reading
+                  playingEntry != playerContext.audioReadingEntry
         {
             playingEntry.audioStreamState.processedDataFormat = false
             playingEntry.reset()
-            if let readingEntry = snapshot.reading {
+            if let readingEntry = playerContext.audioReadingEntry {
                 readingEntry.delegate = nil
                 readingEntry.close()
             }
@@ -745,20 +745,20 @@ open class AudioPlayer {
                 setCurrentReading(entry: playingEntry, startPlaying: true, shouldClearQueue: false)
             }
 
-        } else if snapshot.reading == nil {
+        } else if playerContext.audioReadingEntry == nil {
             if entriesQueue.count(for: .upcoming) > 0 {
                 let entry = entriesQueue.dequeue(type: .upcoming)
-                let shouldStartPlaying = snapshot.playing == nil
+                let shouldStartPlaying = playerContext.audioPlayingEntry == nil
                 playerContext.setInternalState(to: .waitingForData)
                 setCurrentReading(entry: entry, startPlaying: shouldStartPlaying, shouldClearQueue: false)
-            } else if snapshot.playing == nil {
+            } else if playerContext.audioPlayingEntry == nil {
                 if playerContext.internalState != .stopped {
                     stopEngine(reason: .eof)
                 }
             }
         }
 
-        if let playingEntry = snapshot.playing,
+        if let playingEntry = playerContext.audioPlayingEntry,
            playingEntry.audioStreamState.processedDataFormat,
            playingEntry.calculatedBitrate() > 0.0
         {
@@ -788,7 +788,7 @@ open class AudioPlayer {
 
     private func setCurrentReading(entry: AudioEntry?, startPlaying: Bool, shouldClearQueue: Bool) {
         guard let entry = entry else { return }
-        Logger.debug("Setting current reading entry to: \(entry.debugDescription)", category: .generic)
+        Logger.debug("Setting current reading entry to: %@", category: .generic, args: entry.debugDescription)
         if startPlaying {
             rendererContext.fillSilenceAudioBuffer()
         }
@@ -819,9 +819,7 @@ open class AudioPlayer {
 
     private func processFinishPlaying(entry: AudioEntry?, with nextEntry: AudioEntry?) {
         let playingEntry = playerContext.entriesLock.withLock { playerContext.audioPlayingEntry }
-        guard entry == playingEntry else { 
-            return 
-        }
+        guard entry == playingEntry else { return }
 
         let isPlayingSameItemProbablySeek = playerContext.audioPlayingEntry === nextEntry
 
@@ -834,20 +832,6 @@ open class AudioPlayer {
                     nextEntry.seekRequest.requested = false
                 }
             }
-            
-            // Track entries as they transition (NOT for .all mode - handled separately to preserve order)
-            if let entry = entry, !isPlayingSameItemProbablySeek, let url = URL(string: entry.id.id) {
-                if case .all = loopMode {
-                    // Skip tracking for .all mode - it's handled in handleLoopingIfNeeded to preserve order
-                } else {
-                    let alreadyTracked = playedEntries.contains(where: { $0.url == url })
-                    if !alreadyTracked {
-                        let entryInfo = LoopEntryInfo(url: url, headers: [:])
-                        playedEntries.append(entryInfo)
-                    }
-                }
-            }
-            
             playerContext.entriesLock.lock()
             playerContext.audioPlayingEntry = nextEntry
             let playingQueueEntryId = playerContext.audioPlayingEntry?.id ?? AudioEntryId(id: "")
@@ -871,15 +855,6 @@ open class AudioPlayer {
             }
             if !isPlayingSameItemProbablySeek {
                 playerContext.setInternalState(to: .waitingForData)
-                
-                // For .all mode, track the STARTING entry to preserve queue order
-                if case .all = loopMode, let url = URL(string: nextEntry.id.id) {
-                    let alreadyTracked = playedEntries.contains(where: { $0.url == url })
-                    if !alreadyTracked {
-                        let entryInfo = LoopEntryInfo(url: url, headers: [:])
-                        playedEntries.append(entryInfo)
-                    }
-                }
 
                 asyncOnMain { [weak self] in
                     guard let self = self else { return }
@@ -887,19 +862,6 @@ open class AudioPlayer {
                 }
             }
         } else {
-            // Track the LAST entry (NOT for .all mode - handled in handleLoopingIfNeeded to preserve order)
-            if let entry = entry, !isPlayingSameItemProbablySeek, let url = URL(string: entry.id.id) {
-                if case .all = loopMode {
-                    // Skip tracking for .all mode - it's handled in handleLoopingIfNeeded to preserve order
-                } else {
-                    let alreadyTracked = playedEntries.contains(where: { $0.url == url })
-                    if !alreadyTracked {
-                        let entryInfo = LoopEntryInfo(url: url, headers: [:])
-                        playedEntries.append(entryInfo)
-                    }
-                }
-            }
-            
             playerContext.entriesLock.lock()
             playerContext.audioPlayingEntry = nil
             playerContext.entriesLock.unlock()
@@ -934,8 +896,6 @@ open class AudioPlayer {
     private func clearQueue() {
         let pendingItems = entriesQueue.pendingEntriesId()
         entriesQueue.removeAll()
-        playedEntries.removeAll()
-        currentLoopIteration = 0
         if !pendingItems.isEmpty {
             asyncOnMain { [weak self] in
                 guard let self = self else { return }
@@ -957,72 +917,7 @@ open class AudioPlayer {
             guard let self = self else { return }
             self.delegate?.audioPlayerUnexpectedError(player: self, error: error)
         }
-        Logger.error("Error: \(error.localizedDescription)", category: .generic)
-    }
-    
-    /// Handles looping based on the current loop mode
-    /// - Parameter entry: The audio entry that just finished playing
-    private func handleLoopingIfNeeded(for entry: AudioEntry) {
-        // For .all mode, track the last entry before checking if we should loop
-        // This ensures the complete queue is captured for re-queueing
-        if case .all = loopMode, let url = URL(string: entry.id.id) {
-            let alreadyTracked = playedEntries.contains(where: { $0.url == url })
-            if !alreadyTracked {
-                let entryInfo = LoopEntryInfo(url: url, headers: [:])
-                playedEntries.append(entryInfo)
-            }
-        }
-        
-        switch loopMode {
-        case .off:
-            processFinishPlaying(entry: entry, with: nil)
-            
-        case .single(let times):
-            // Check if we've reached the loop count limit
-            if let maxLoops = times, maxLoops > 0, currentLoopIteration >= maxLoops {
-                processFinishPlaying(entry: entry, with: nil)
-                return
-            }
-
-            guard let url = URL(string: entry.id.id) else {
-                processFinishPlaying(entry: entry, with: nil)
-                return
-            }
-            
-            // Increment loop iteration
-            currentLoopIteration += 1
-            
-            // Re-create the entry and enqueue for playback
-            let newEntry = entryProvider.provideAudioEntry(url: url, headers: [:])
-            newEntry.delegate = self
-            entriesQueue.enqueue(item: newEntry, type: .upcoming)
-            
-        case .all(let times):
-            // Check if we're at the end of all entries (nothing in queue)
-            if entriesQueue.count(for: .upcoming) == 0 && entriesQueue.count(for: .buffering) == 0 {
-                // Check if we've reached the loop count limit
-                if let maxLoops = times, maxLoops > 0, currentLoopIteration >= maxLoops {
-                    processFinishPlaying(entry: entry, with: nil)
-                    return
-                }
-                
-                // Increment loop iteration
-                currentLoopIteration += 1
-
-                // Make a copy of playedEntries to re-queue
-                let entriesToRequeue = playedEntries
-                
-                // Clear played entries BEFORE re-queueing to prevent duplicate tracking
-                playedEntries.removeAll()
-                
-                // Re-create all played entries and enqueue as upcoming
-                for entryInfo in entriesToRequeue {
-                    let newEntry = entryProvider.provideAudioEntry(url: entryInfo.url, headers: entryInfo.headers)
-                    newEntry.delegate = self
-                    entriesQueue.enqueue(item: newEntry, type: .upcoming)
-                }
-            }
-        }
+        Logger.error("Error: %@", category: .generic, args: error.localizedDescription)
     }
 }
 
@@ -1080,14 +975,6 @@ extension AudioPlayer: AudioStreamSourceDelegate {
             source.delegate = nil
             source.close()
             return
-        }
-
-        // Flush any remaining packets from AudioFileStream before marking EOF
-        // This is critical for formats like FLAC that use sync words to determine packet boundaries.
-        // Without this flush, the final partial packet will not be delivered.
-        let flushStatus = fileStreamProcessor.flushRemainingPackets()
-        if flushStatus != noErr {
-            Logger.debug("Failed to flush remaining packets at EOF: \(flushStatus)", category: .generic)
         }
 
         readingEntry.lock.lock()
