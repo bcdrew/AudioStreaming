@@ -47,7 +47,7 @@ let package = Package(
                 .product(name: "ogg", package: "ogg-binary-xcframework"),
                 .product(name: "vorbis", package: "vorbis-binary-xcframework")
             ],
-            path: "AudioStreaming",
+            path: "Source",
             exclude: ["AudioStreaming.h", "Streaming/OggVorbis", "Info.plist"],
             swiftSettings: []
         ),
@@ -56,7 +56,7 @@ let package = Package(
             dependencies: [
                 "AudioStreaming"
             ],
-            path: "AudioStreamingTests",
+            path: "SourceTests",
             exclude: ["Info.plist", "Streaming/output"],
             resources: [
                 // Test resources for metadata stream processor tests
