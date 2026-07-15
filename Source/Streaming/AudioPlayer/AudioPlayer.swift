@@ -4,6 +4,7 @@
 //
 
 import AVFoundation
+import OSLog
 import CoreAudio
 
 open class AudioPlayer {
