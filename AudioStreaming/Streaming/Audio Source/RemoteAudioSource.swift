@@ -168,8 +168,33 @@ public class RemoteAudioSource: AudioStreamSource {
         icycastHeadersProcessor.reset()
         shouldTryParsingIcycastHeaders = false
 
+        doPerfomOpen(seek: offset)
+    }
+
+    /// Seek to the given offset with a CDN URL refresh callback.
+    /// The callback is invoked before the network request to obtain a fresh URL.
+    ///
+    /// - Parameters:
+    ///   - offset: The offset to seek to.
+    ///   - urlRefreshCB: A closure that returns a fresh URL before the network request.
+    public func seekAsync(at offset: Int, urlRefreshCB: @escaping () async throws -> URL) {
+        close()
+
+        relativePosition = 0
+        seekOffset = offset
+
+        if !supportsSeek, offset != relativePosition {
+            return
+        }
+
+        mp4Restructure.clear()
+        retrierTimeout.cancel()
+        metadataStreamProcessor.reset()
+        icycastHeadersProcessor.reset()
+        shouldTryParsingIcycastHeaders = false
+
         Task {
-            await performOpen(seek: offset)
+            await performOpenAsync(seek: offset, urlRefreshCB: urlRefreshCB)
         }
     }
 
@@ -188,53 +213,69 @@ public class RemoteAudioSource: AudioStreamSource {
             guard let self = self else { return }
             guard connection.isConnected else { return }
             if self.waitingForNetwork {
-                Task {
-                    await self.seek(at: self.supportsSeek ? self.position : 0)
-                    self.waitingForNetwork = false
-                }
+                self.seek(at: self.supportsSeek ? self.position : 0)
+                self.waitingForNetwork = false
             }
         }
     }
 
-    private func performOpen(seek seekOffset: Int) async {
+    private func performOpen(seek seekOffset: Int) {
         if seekOffset == 0 {
-            await initialRequest { [weak self] in
+            initialRequest { [weak self] in
                 guard let self else { return }
                 if self.parsedHeaderOutput?.isMp4 == true {
-                    Task {
-                        await self.handleMp4Files()
-                    }
+                    self.handleMp4Files()
                 } else {
-                    Task {
-                        await self.doPerfomOpen(seek: 0)
-                    }
+                    self.doPerfomOpen(seek: 0)
                 }
             }
         } else {
             if mp4Restructure.dataOptimized {
                 let adjustedOffset = mp4Restructure.seekAdjusted(offset: seekOffset)
-                Task {
-                    await doPerfomOpen(seek: adjustedOffset)
-                }
+                doPerfomOpen(seek: adjustedOffset)
             } else {
-                Task {
-                    await doPerfomOpen(seek: seekOffset)
-                }
+                doPerfomOpen(seek: seekOffset)
             }
         }
     }
 
-    private func doPerfomOpen(seek seekOffset: Int) async {
-        let targetUrl: URL
-        if let urlRefreshCB {
-            do {
-                targetUrl = try await urlRefreshCB()
-            } catch {
-                delegate?.errorOccurred(source: self, error: error)
-                return
+    private func performOpenAsync(seek seekOffset: Int, urlRefreshCB: @escaping () async throws -> URL) async {
+        if seekOffset == 0 {
+            await initialRequestAsync(urlRefreshCB)
+            if parsedHeaderOutput?.isMp4 == true {
+                await handleMp4FilesAsync(urlRefreshCB: urlRefreshCB)
+            } else {
+                await doPerfomOpenAsync(seek: 0, urlRefreshCB: urlRefreshCB)
             }
         } else {
-            targetUrl = url
+            if mp4Restructure.dataOptimized {
+                let adjustedOffset = mp4Restructure.seekAdjusted(offset: seekOffset)
+                await doPerfomOpenAsync(seek: adjustedOffset, urlRefreshCB: urlRefreshCB)
+            } else {
+                await doPerfomOpenAsync(seek: seekOffset, urlRefreshCB: urlRefreshCB)
+            }
+        }
+    }
+
+    private func doPerfomOpen(seek seekOffset: Int) {
+        let urlRequest = buildUrlRequest(with: url, seekIfNeeded: seekOffset)
+        streamRequest = networkingClient.stream(request: urlRequest)
+            .responseStream { [weak self] event in
+                guard let self = self else { return }
+                self.handleResponse(event: event)
+            }
+            .resume()
+
+        metadataStreamProcessor.delegate = self
+    }
+
+    private func doPerfomOpenAsync(seek seekOffset: Int, urlRefreshCB: @escaping () async throws -> URL) async {
+        let targetUrl: URL
+        do {
+            targetUrl = try await urlRefreshCB()
+        } catch {
+            delegate?.errorOccurred(source: self, error: error)
+            return
         }
 
         let urlRequest = buildUrlRequest(with: targetUrl, seekIfNeeded: seekOffset)
@@ -248,21 +289,8 @@ public class RemoteAudioSource: AudioStreamSource {
         metadataStreamProcessor.delegate = self
     }
 
-    private func initialRequest(completion: @escaping () -> Void) async {
-        let targetUrl: URL
-        if let urlRefreshCB {
-            do {
-                targetUrl = try await urlRefreshCB()
-            } catch {
-                delegate?.errorOccurred(source: self, error: error)
-                completion()
-                return
-            }
-        } else {
-            targetUrl = url
-        }
-
-        let urlRequest = fetchUrlForPartialContent(with: targetUrl)
+    private func initialRequest(completion: @escaping () -> Void) {
+        let urlRequest = fetchUrlForPartialContent(with: url)
         let task: NetworkDataStream = networkingClient.stream(request: urlRequest)
         task.responseStream { [weak self] event in
             switch event {
@@ -276,7 +304,52 @@ public class RemoteAudioSource: AudioStreamSource {
         }.resume()
     }
 
-    private func handleMp4Files() async {
+    private func initialRequestAsync(_ urlRefreshCB: @escaping () async throws -> URL) async {
+        let targetUrl: URL
+        do {
+            targetUrl = try await urlRefreshCB()
+        } catch {
+            delegate?.errorOccurred(source: self, error: error)
+            return
+        }
+
+        let urlRequest = fetchUrlForPartialContent(with: targetUrl)
+        let task: NetworkDataStream = networkingClient.stream(request: urlRequest)
+        await withCheckedContinuation { continuation in
+            task.responseStream { [weak self] event in
+                switch event {
+                case let .response(urlResponse):
+                    self?.parseResponseHeader(response: urlResponse)
+                    task.cancel()
+                    continuation.resume()
+                default:
+                    break
+                }
+            }.resume()
+        }
+    }
+
+    private func handleMp4Files() {
+        mp4Restructure.optimizeIfNeeded { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(value):
+                if let value {
+                    addStreamOperation {
+                        let audioCount = self.processAudio(data: value.initialData)
+                        self.relativePosition += audioCount
+                    }
+                    self.doPerfomOpen(seek: value.mdatOffset)
+                } else {
+                    self.doPerfomOpen(seek: 0)
+                }
+            case let .failure(failure):
+                self.delegate?.errorOccurred(source: self, error: failure)
+            }
+        }
+    }
+
+    private func handleMp4FilesAsync(urlRefreshCB: @escaping () async throws -> URL) async {
         let result: Result<RemoteMp4Restructure.RestructuredData?, any Error> = await withCheckedContinuation { continuation in
             mp4Restructure.optimizeIfNeeded { result in
                 continuation.resume(returning: result)
@@ -290,9 +363,9 @@ public class RemoteAudioSource: AudioStreamSource {
                     let audioCount = self.processAudio(data: value.initialData)
                     self.relativePosition += audioCount
                 }
-                await doPerfomOpen(seek: value.mdatOffset)
+                await doPerfomOpenAsync(seek: value.mdatOffset, urlRefreshCB: urlRefreshCB)
             } else {
-                await doPerfomOpen(seek: 0)
+                await doPerfomOpenAsync(seek: 0, urlRefreshCB: urlRefreshCB)
             }
         case let .failure(failure):
             delegate?.errorOccurred(source: self, error: failure)
