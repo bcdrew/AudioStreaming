@@ -246,7 +246,18 @@ open class AudioPlayer {
         let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers)
         play(audioEntry: audioEntry)
     }
-    
+
+    /// Starts the audio playback for the given URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - parameter url: A `URL` specifying the audio context to be played.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func play(url: URL, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers, urlRefreshCB: urlRefreshCB)
+        play(audioEntry: audioEntry)
+    }
+
     /// Starts the audio playback for the given URL
     ///
     /// - parameter url: A `URL` specifying the audio context to be played.
@@ -255,6 +266,19 @@ open class AudioPlayer {
     /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
     public func play(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String]) {
         let audioEntry = entryProvider.provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers)
+        play(audioEntry: audioEntry)
+    }
+
+    /// Starts the audio playback for the given URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - parameter url: A `URL` specifying the audio context to be played.
+    /// - parameter httpMethod: A `String` specifying the HTTP method to use (e.g. "GET", "POST").
+    /// - parameter httpBody: A "Data" specifying the HTTP request body, if any.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func play(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: urlRefreshCB)
         play(audioEntry: audioEntry)
     }
 
@@ -364,6 +388,30 @@ open class AudioPlayer {
         queue(audioEntry: audioEntry, after: afterUrl)
     }
 
+    /// Queues the specified URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - Parameter url: A `URL` specifying the audio content to be played.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func queue(url: URL, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers, urlRefreshCB: urlRefreshCB)
+        queue(audioEntry: audioEntry)
+    }
+
+    /// Queues the specified URL with a refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - Parameter url: A `URL` specifying the audio content to be played.
+    /// - parameter httpMethod: A `String` specifying the HTTP method to use (e.g. "GET", "POST").
+    /// - parameter httpBody: A "Data" specifying the HTTP request body, if any.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func queue(url: URL, httpMethod: String?, httpBody: Data?, headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        let audioEntry = entryProvider.provideAudioEntry(url: url, httpMethod: httpMethod, httpBody: httpBody, headers: headers, urlRefreshCB: urlRefreshCB)
+        queue(audioEntry: audioEntry)
+    }
+
     /// Queues the specified URLs
     ///
     /// - Parameter url: A array of `URL`s specifying the audio content to be played.
@@ -372,6 +420,26 @@ open class AudioPlayer {
         serializationQueue.sync {
             for url in urls {
                 let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers)
+                audioEntry.delegate = self
+                entriesQueue.enqueue(item: audioEntry, type: .upcoming)
+            }
+        }
+        checkRenderWaitingAndNotifyIfNeeded()
+        sourceQueue.async { [weak self] in
+            self?.processSource()
+        }
+    }
+
+    /// Queues the specified URLs with a shared refresh callback.
+    /// The callback is invoked before each network request to obtain a fresh URL.
+    ///
+    /// - Parameter urls: An array of `URL`s specifying the audio content to be played.
+    /// - parameter headers: A `Dictionary` specifying any additional headers to be pass to the network request.
+    /// - parameter urlRefreshCB: A closure that returns a fresh URL before each network request.
+    public func queue(urls: [URL], headers: [String: String], urlRefreshCB: @escaping () async throws -> URL) {
+        serializationQueue.sync {
+            for url in urls {
+                let audioEntry = entryProvider.provideAudioEntry(url: url, headers: headers, urlRefreshCB: urlRefreshCB)
                 audioEntry.delegate = self
                 entriesQueue.enqueue(item: audioEntry, type: .upcoming)
             }
